@@ -36,7 +36,8 @@ In general, this mod plays nice with other rendering mods as it does not affect 
 
 Minecraft 1.8.9 does not have a separate slider for simulation distance as this was only introduced in later versions of the game. The render distance is the simulation distance. (simulation distance being defined as the distance in-which the game will check for chunk updates). While using this mod, changing your render distance will reload the simulated chunks near you but the mod will still render cached chunks up to your set visual limit (this is 32 by default but can be arbitrarily large).
 
-Chunks cached by the mod are in general going to load in more quickly than chunks loaded with simulation. This means that chunks outside the render distance set by the client will in general load in more quickly than those inside that range. As such, I would generally recommend keeping client render distance somewhat low (like around 12) while using this mod to avoid long wait times and rendering issues. This is less of an issue on multiplayer, 
+Chunks cached by the mod are in general going to load in more quickly than chunks loaded with simulation. This means that chunks outside the render distance set by the client will in general load in more quickly than those inside that range. As such, I would generally recommend keeping client render distance somewhat low (like around 12) while using this mod to avoid long wait times and rendering issues. This is less of an issue on multiplayer. 
+Loading new chunks is substantially more work, just in general, than loading already cached chunks. So returning to an area will load chunks much faster than loading them all for the first time. 
 
 I would not use this with shaders. Do what you want though.
 
