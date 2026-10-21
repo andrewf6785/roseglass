@@ -1,6 +1,6 @@
 # Rose Glasses
 
-A minecraft farsight mod for 1.8.9. Allows the client to store chunk data in memory in order to render non-simulated chunks while they are beyond render distance. Compatible with Optifine, works in multiplayer.
+A Minecraft farsight mod for 1.8.9. Allows the client to store chunk data in memory in order to render non-simulated chunks while they are beyond render distance. Compatible with Optifine, works in multiplayer.
 
 [Jump to Setup](#setup)
 
