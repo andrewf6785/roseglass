@@ -49,6 +49,8 @@ This is because of how most multiplayer servers do rendering: they will attempt 
 
 So if there are gaps around the player on multiplayer, increase your client render distance (the render distance slider in video-settings) until they go away.
 
+<img src="gallery/multiplayer2.png" alt="Rose Glasses gallery multiplayer 2">
+
 ## Setup
 
 Recommended: download .jar file from modrinth, curse forge, or from github (`roseglass-0.7.3.jar`)
