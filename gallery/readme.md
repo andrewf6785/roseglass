@@ -7,3 +7,8 @@
 <img src="picture4.png" alt="Rose Glasses gallery picture 4">
 
 <img src="picture5.png" alt="Rose Glasses gallery picture 5">
+
+<img src="multiplayer1.png" alt="Rose Glasses gallery multiplayer 1">
+
+<img src="multiplayer2.png" alt="Rose Glasses gallery multiplayer 2">
+
