@@ -1,0 +1,18 @@
+buildscript {
+    repositories {
+        maven { url = 'https://files.minecraftforge.net/maven' }
+        mavenCentral()
+    }
+    dependencies { classpath 'net.minecraftforge.gradle:ForgeGradle:2.1.6' }
+}
+apply plugin: 'net.minecraftforge.gradle.forge'
+version = '0.7.3'
+group = 'dev.roseglass'
+archivesBaseName = 'roseglass'
+sourceCompatibility = targetCompatibility = '1.8'
+minecraft {
+    version = '1.8.9-11.15.1.2318-1.8.9'
+    mappings = 'stable_22'
+    runDir = 'run'
+}
+tasks.withType(JavaCompile) { options.encoding = 'UTF-8' }

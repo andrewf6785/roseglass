@@ -1,0 +1,10 @@
+[
+  {
+    "modid": "roseglass",
+    "name": "roseglass",
+    "description": "Detached visual cache at Y=50 and above; independently configurable visual radius.",
+    "version": "0.7.3",
+    "mcversion": "1.8.9",
+    "clientSideOnly": true
+  }
+]
