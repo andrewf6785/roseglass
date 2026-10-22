@@ -4,7 +4,7 @@ A Minecraft farsight mod for 1.8.9. Allows the client to store chunk data in mem
 
 [Jump to Setup](#setup)
 
-<img src="gallery/picture1.png" alt="Rose Glasses gallery picture 1">
+<img src="gallery/multiplayer2.png" alt="Rose Glasses gallery multiplayer 2">
 
 ## How it works
 
@@ -49,7 +49,7 @@ This is because of how most multiplayer servers do rendering: they will attempt 
 
 So if there are gaps around the player on multiplayer, increase your client render distance (the render distance slider in video-settings) until they go away.
 
-<img src="gallery/multiplayer2.png" alt="Rose Glasses gallery multiplayer 2">
+<img src="gallery/picture1.png" alt="Rose Glasses gallery picture 1">
 
 ## Setup
 
