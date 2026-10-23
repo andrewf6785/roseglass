@@ -16,68 +16,90 @@ import net.minecraftforge.client.ForgeHooksClient;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL13;
 
-/** DEBUG ONLY: vanilla block tessellation, separate display lists and final world pass. */
+/** Separate final terrain pass. Section replacements preserve old geometry until compilation succeeds. */
 final class DebugMesh {
     boolean borderOverlap;
-    private int lists;
+    long visibleBits = -1L;
+    private final int[] lists = new int[16];
+    private int completed;
+    private boolean initialized;
+    private long emittedBits;
     private int originX, originZ;
     private static WorldRenderer buildBuffer;
 
     void delete() {
-        if (lists != 0) GL11.glDeleteLists(lists, 4);
-        lists = 0;
+        if (!initialized) return;
+        for (int s = 0; s < 16; s++) { if (lists[s] != 0) GL11.glDeleteLists(lists[s], 4); lists[s] = 0; }
+        completed = 0; emittedBits = 0; initialized = false;
     }
-
-    boolean ready() { return lists != 0; }
+    boolean ready() { return initialized; }
+    int completedSections() { return completed; }
+    void markEmpty() { initialized = true; }
+    long sectionBits() { return emittedBits; }
 
     static void borderDepth(boolean overlap) {
-        if (overlap) {
-            GL11.glEnable(GL11.GL_POLYGON_OFFSET_FILL);
-            GL11.glPolygonOffset(1.0F, 4.0F);
-        } else GL11.glDisable(GL11.GL_POLYGON_OFFSET_FILL);
+        if (overlap) { GL11.glEnable(GL11.GL_POLYGON_OFFSET_FILL); GL11.glPolygonOffset(1.0F, 4.0F); }
+        else GL11.glDisable(GL11.GL_POLYGON_OFFSET_FILL);
     }
 
-    void build(VisualChunk chunk, RetainedAccess access) {
-        delete();
-        originX = chunk.xPosition << 4;
-        originZ = chunk.zPosition << 4;
+    void replaceSection(int section, int replacement, long bits) {
+        int previous = lists[section];
+        lists[section] = replacement;
+        emittedBits = (emittedBits & ~(15L << (section * 4))) | (bits & (15L << (section * 4)));
+        completed |= 1 << section; initialized = true;
+        if (previous != 0) GL11.glDeleteLists(previous, 4);
+    }
+
+    void buildSection(VisualChunk chunk, RetainedAccess access, int section) {
+        if (section < (VisualChunk.MIN_Y >> 4) || section > 15) throw new IllegalArgumentException("Section outside retained terrain");
+        if (!chunk.hasSection(section)) { replaceSection(section, 0, 0); return; }
         if (buildBuffer == null) buildBuffer = new WorldRenderer(524288);
         WorldRenderer buffer = buildBuffer;
         WorldVertexBufferUploader uploader = new WorldVertexBufferUploader();
-        lists = GL11.glGenLists(4);
-        if (lists == 0) throw new IllegalStateException("Could not allocate debug terrain display lists");
+        int replacement = GL11.glGenLists(4);
+        if (replacement == 0) throw new IllegalStateException("Could not allocate terrain section display lists");
+        long bits = 0;
+        boolean drawing = false;
+        int x0 = chunk.xPosition << 4, z0 = chunk.zPosition << 4;
         GL11.glPushClientAttrib(GL11.GL_CLIENT_VERTEX_ARRAY_BIT);
         try {
             for (EnumWorldBlockLayer layer : EnumWorldBlockLayer.values()) {
                 ForgeHooksClient.setRenderLayer(layer);
                 buffer.begin(GL11.GL_QUADS, DefaultVertexFormats.BLOCK);
-                buffer.setTranslation(-originX, 0, -originZ);
-                for (int y = VisualChunk.MIN_Y; y < 256; y++) {
-                    if (!chunk.hasSection(y >> 4)) continue;
-                    for (int z = 0; z < 16; z++) {
-                        for (int x = 0; x < 16; x++) {
-                            BlockPos pos = new BlockPos(originX + x, y, originZ + z);
-                            IBlockState state = access.getBlockState(pos);
-                            if (state.getBlock().getRenderType() != -1 && state.getBlock().canRenderInLayer(layer)) {
-                                Minecraft.getMinecraft().getBlockRendererDispatcher()
-                                        .renderBlock(state, pos, access, buffer);
-                            }
-                        }
+                drawing = true;
+                buffer.setTranslation(-x0, 0, -z0);
+                for (int y = Math.max(VisualChunk.MIN_Y, section * 16); y < (section + 1) * 16; y++)
+                    for (int z = 0; z < 16; z++) for (int x = 0; x < 16; x++) {
+                        BlockPos pos = new BlockPos(x0 + x, y, z0 + z);
+                        IBlockState state = access.getBlockState(pos);
+                        if (state.getBlock().getRenderType() != -1 && state.getBlock().canRenderInLayer(layer))
+                            Minecraft.getMinecraft().getBlockRendererDispatcher().renderBlock(state, pos, access, buffer);
                     }
-                }
+                if (buffer.getVertexCount() != 0) bits |= 1L << (section * 4 + layer.ordinal());
                 buffer.finishDrawing();
-                GL11.glNewList(lists + layer.ordinal(), GL11.GL_COMPILE);
+                drawing = false;
+                GL11.glNewList(replacement + layer.ordinal(), GL11.GL_COMPILE);
                 try { uploader.draw(buffer); } finally { GL11.glEndList(); }
             }
-        } catch (RuntimeException | Error e) {
-            delete();
-            throw e;
+            // Commit only after every layer is ready. Unchanged sections keep their original GL IDs.
+            originX = x0; originZ = z0;
+            replaceSection(section, replacement, bits); replacement = 0;
         } finally {
-            GL11.glPopClientAttrib();
-            ForgeHooksClient.setRenderLayer(null);
-            buffer.setTranslation(0, 0, 0);
-            GlStateManager.resetColor();
+            if (drawing) { buffer.finishDrawing(); buffer.reset(); }
+            if (replacement != 0) GL11.glDeleteLists(replacement, 4);
+            GL11.glPopClientAttrib(); ForgeHooksClient.setRenderLayer(null);
+            buffer.setTranslation(0, 0, 0); GlStateManager.resetColor();
         }
+    }
+
+    void drawLayer(EnumWorldBlockLayer layer) {
+        for (int section = 0; section < 16; section++)
+            if (lists[section] != 0 && (visibleBits & (1L << (section * 4 + layer.ordinal()))) != 0)
+                GL11.glCallList(lists[section] + layer.ordinal());
+    }
+
+    long distance(int cameraX, int cameraZ) {
+        return Visibility.distance(cameraX, cameraZ, originX >> 4, originZ >> 4);
     }
 
     static void drawAll(List<DebugMesh> meshes, Entity camera, float partialTicks, int visualRadius) {
@@ -131,7 +153,7 @@ final class DebugMesh {
                     borderDepth(mesh.borderOverlap);
                     GL11.glPushMatrix();
                     GL11.glTranslated(mesh.originX - x, -y, mesh.originZ - z);
-                    GL11.glCallList(mesh.lists + layer.ordinal());
+                    mesh.drawLayer(layer);
                     GL11.glPopMatrix();
                 }
             }

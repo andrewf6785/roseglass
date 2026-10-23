@@ -2,8 +2,6 @@ package dev.roseglass;
 
 /** Independent vanilla and visual square chunk radii. No Minecraft dependencies. */
 public final class Visibility {
-    static final int BORDER_INSET = 1;
-    static final int BORDER_OUTSET = 1;
 
     private Visibility() {}
 
@@ -19,9 +17,17 @@ public final class Visibility {
         return retained && !live && distance > vanillaRadius && distance <= visualRadius;
     }
 
+    public static boolean insideNative(long distance, int radius) {
+        return distance >= 0 && distance <= radius;
+    }
+
     public static boolean border(long distance, boolean enabled, int vanillaRadius, int visualRadius) {
-        return enabled && visualRadius > vanillaRadius && distance >= Math.max(0L, (long) vanillaRadius - BORDER_INSET)
-                && distance <= (long) vanillaRadius + BORDER_OUTSET && distance <= visualRadius;
+        return enabled && distance <= visualRadius && distance >= Math.max(0L, (long) vanillaRadius - 2)
+                && insideNative(distance, vanillaRadius);
+    }
+
+    public static boolean keepMesh(long distance, boolean ready, int visualRadius) {
+        return ready && distance >= 0 && distance <= visualRadius;
     }
 
     public static long key(int x, int z) {

@@ -5,6 +5,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.security.MessageDigest;
 import java.util.Map;
+import java.util.PriorityQueue;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.function.LongPredicate;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -27,6 +33,36 @@ final class DiskCache {
         }, "roseglass-cache-flush"));
     }
     private final Path directory;
+    private final RegionIndex index = new RegionIndex();
+    private volatile View view;
+    private final AtomicBoolean selecting = new AtomicBoolean();
+    private final AtomicReference<Selection> selected = new AtomicReference<>();
+    private final ConcurrentLinkedQueue<Addition> additions = new ConcurrentLinkedQueue<>();
+    // Candidates and queued keys belong to the client thread; worker callbacks never inspect game maps.
+    private final PriorityQueue<RegionIndex.Column> candidates = new PriorityQueue<>((a, b) -> {
+        View current = view;
+        int order = Long.compare(Visibility.distance(current.x, current.z, a.x, a.z),
+                Visibility.distance(current.x, current.z, b.x, b.z));
+        return order == 0 ? Long.compare(a.key, b.key) : order;
+    });
+    private final Set<Long> queued = new HashSet<>();
+    private Selection installing;
+    private int installCursor;
+    private static final class View {
+        final int x, z, radius;
+        View(int x, int z, int radius) { this.x = x; this.z = z; this.radius = radius; }
+        boolean contains(int x, int z) { return Visibility.distance(this.x, this.z, x, z) <= radius; }
+    }
+    private static final class Selection {
+        final View view;
+        final List<RegionIndex.Column> columns;
+        Selection(View view, List<RegionIndex.Column> columns) { this.view = view; this.columns = columns; }
+    }
+    private static final class Addition {
+        final View view;
+        final RegionIndex.Column column;
+        Addition(View view, RegionIndex.Column column) { this.view = view; this.column = column; }
+    }
     private static final AtomicLong REVISIONS = new AtomicLong();
     private static final ConcurrentMap<Path, Long> LATEST = new ConcurrentHashMap<>();
     private final ConcurrentMap<Long, Path> files = new ConcurrentHashMap<>();
@@ -47,7 +83,9 @@ final class DiskCache {
     static final class Result {
         final long key;
         final VisualChunk chunk;
-        Result(long key, VisualChunk chunk) { this.key = key; this.chunk = chunk; }
+        final RegionIndex.Column retry;
+        Result(long key, VisualChunk chunk) { this(key, chunk, null); }
+        Result(long key, VisualChunk chunk, RegionIndex.Column retry) { this.key = key; this.chunk = chunk; this.retry = retry; }
     }
 
     DiskCache(Path directory) {
@@ -59,11 +97,15 @@ final class DiskCache {
                     for (Path path : entries) {
                         try {
                             String[] parts = path.getFileName().toString().replace(".rgc.gz", "").split("_");
-                            if (parts.length == 3) files.put(Visibility.key(Integer.parseInt(parts[1]), Integer.parseInt(parts[2])), path);
+                            if (parts.length == 3) {
+                                int x = Integer.parseInt(parts[1]), z = Integer.parseInt(parts[2]);
+                                files.put(Visibility.key(x, z), path); index.put(x, z, path);
+                            }
                         } catch (NumberFormatException ignored) { }
                     }
                 }
             } catch (IOException e) { fail("Cannot open disk cache", e); }
+            selectNearby();
         });
     }
 
@@ -99,7 +141,14 @@ final class DiskCache {
                         // A previous session may still have pending writes when the same scope reopens.
                         // Only the newest scheduled revision for a file may replace it.
                         if (!Long.valueOf(save.revision).equals(LATEST.get(save.path))) continue;
-                        try { writeFile(save.path, save.chunk); files.put(entry.getKey(), save.path); }
+                        try {
+                            writeFile(save.path, save.chunk); files.put(entry.getKey(), save.path);
+                            int x = save.chunk.xPosition, z = save.chunk.zPosition;
+                            index.put(x, z, save.path);
+                            View current = view;
+                            if (current != null && current.contains(x, z))
+                                additions.add(new Addition(current, new RegionIndex.Column(x, z, save.path)));
+                        }
                         catch (IOException | RuntimeException e) { fail("Cannot save " + save.path.getFileName(), e); }
                         finally { LATEST.remove(save.path, save.revision); }
                     }
@@ -111,32 +160,74 @@ final class DiskCache {
         });
     }
 
-    void request(int cameraX, int cameraZ, int radius, java.util.Set<Long> present) {
-        if (!enabled || loading.size() >= 8) return;
-        for (Map.Entry<Long, Path> entry : files.entrySet()) {
-            long key = entry.getKey();
-            int x = (int) (key >> 32), z = (int) key;
-            if (present.contains(key) || Visibility.distance(cameraX, cameraZ, x, z) > radius || !loading.add(key)) continue;
+    private void selectNearby() {
+        if (!enabled || view == null || !selecting.compareAndSet(false, true)) return;
+        IO.execute(() -> {
+            View target = null;
+            try {
+                if (enabled) {
+                    target = view;
+                    List<RegionIndex.Column> columns = index.nearby(target.x, target.z, target.radius);
+                    if (target == view) selected.set(new Selection(target, columns));
+                }
+            } finally {
+                selecting.set(false);
+                if (enabled && target != view) selectNearby();
+            }
+        });
+    }
+
+    private void offer(RegionIndex.Column column) {
+        if (view != null && view.contains(column.x, column.z) && queued.add(column.key)) candidates.add(column);
+    }
+
+    void request(int cameraX, int cameraZ, int radius, LongPredicate present) {
+        if (!enabled) return;
+        if (view == null || view.x != cameraX || view.z != cameraZ || view.radius != radius) {
+            view = new View(cameraX, cameraZ, radius);
+            candidates.clear(); queued.clear();
+            installing = null; installCursor = 0;
+            selectNearby();
+        }
+        Selection selection = selected.getAndSet(null);
+        if (selection != null && selection.view == view) { installing = selection; installCursor = 0; }
+        int installed = 0;
+        while (installing != null && installed++ < 64 && installCursor < installing.columns.size())
+            offer(installing.columns.get(installCursor++));
+        if (installing != null && installCursor == installing.columns.size()) installing = null;
+        Addition addition;
+        int inspected = 0;
+        while (inspected++ < 64 && (addition = additions.poll()) != null)
+            if (addition.view == view) offer(addition.column);
+        // Bounded client work and at most eight queued/completed-but-uncollected disk reads.
+        inspected = 0;
+        while (loading.size() < 8 && inspected++ < 64 && !candidates.isEmpty()) {
+            RegionIndex.Column column = candidates.remove(); queued.remove(column.key);
+            if (!view.contains(column.x, column.z) || present.test(column.key) || !loading.add(column.key)) continue;
             IO.execute(() -> {
                 VisualChunk chunk = null;
-                if (enabled) {
+                View current = view;
+                boolean obsolete = !enabled || current == null || !current.contains(column.x, column.z);
+                if (!obsolete) {
                     try {
-                        chunk = readFile(entry.getValue());
-                        if (Visibility.key(chunk.xPosition, chunk.zPosition) != key) throw new IOException("Coordinate mismatch");
+                        chunk = readFile(column.path);
+                        if (Visibility.key(chunk.xPosition, chunk.zPosition) != column.key) throw new IOException("Coordinate mismatch");
                     } catch (IOException | RuntimeException e) {
-                        files.remove(key); fail("Ignoring incompatible/corrupt " + entry.getValue().getFileName(), e);
-                        chunk = null;
+                        files.remove(column.key); index.remove(column.x, column.z);
+                        fail("Ignoring incompatible/corrupt " + column.path.getFileName(), e); chunk = null;
                     }
                 }
-                ready.add(new Result(key, chunk));
+                ready.add(new Result(column.key, chunk, obsolete ? column : null));
             });
-            if (loading.size() >= 8) break;
         }
     }
 
     Result poll() {
         Result result = ready.poll();
-        if (result != null) loading.remove(result.key);
+        if (result != null) {
+            loading.remove(result.key);
+            if (enabled && result.retry != null) offer(result.retry);
+        }
         return result;
     }
 
@@ -144,6 +235,7 @@ final class DiskCache {
         enabled = false;
         for (Save save : writes.values()) LATEST.remove(save.path, save.revision);
         writes.clear();
+        candidates.clear(); queued.clear(); selected.set(null); additions.clear(); installing = null;
     }
     String status() { return error.isEmpty() ? "files=" + files.size() + " writes=" + writes.size() : "error=" + error; }
     Path directory() { return directory; }

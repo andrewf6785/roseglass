@@ -125,6 +125,19 @@ final class VisualChunk extends ColumnData {
         return ((pos.getY() - firstY) << 8) | ((pos.getZ() & 15) << 4) | (pos.getX() & 15);
     }
 
+    int sectionMask() {
+        int mask = 0;
+        for (int s = MIN_Y >> 4; s < 16; s++) if (states[s] != null) mask |= 1 << s;
+        return mask;
+    }
+
+    boolean sameSection(VisualChunk other, int section) {
+        return other != null && noSky == other.noSky && worldType == other.worldType
+                && Arrays.equals(states[section], other.states[section])
+                && Arrays.equals(lights[section], other.lights[section])
+                && Arrays.equals(biomes, other.biomes) && Arrays.equals(heights, other.heights);
+    }
+
     boolean hasSection(int section) { return states[section] != null; }
 
     @Override IBlockState getBlockState(BlockPos pos) {
