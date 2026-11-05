@@ -53,7 +53,7 @@ So if there are gaps around the player on multiplayer, increase your client rend
 
 ## Setup
 
-Recommended: download .jar file from modrinth, curse forge, or from github (`roseglass-0.7.3.jar`)
+Recommended: download .jar file from modrinth, curse forge, or from github (`roseglass-0.8.4.jar`)
 
 Alternatively, you can download the source from github (this project is open source) and compile the mod yourself. DM me if you want a guide on how to do this.
 
