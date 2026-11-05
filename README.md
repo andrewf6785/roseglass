@@ -56,8 +56,13 @@ So if there are gaps around the player on multiplayer, increase your client rend
 Recommended: download .jar file from modrinth, curse forge, or from github (`roseglass-0.8.4.jar`)
 
 Alternatively, you can download the source from github (this project is open source) and compile the mod yourself:
+
+
 To build on Windows, install JDK 8, then run the following from the repository folder:
+
 $env:JAVA_HOME = 'C:\Path\To\Your\jdk8'
+
 .\gradlew.bat build
+
 
 I would only install this mod if you have a dedicated gpu to do rendering with. All testing was done with an RTX 3070. Do what ya want though. [<https://www.reddit.com/r/Minecraft/comments/rp8vfn/how_do_i_set_minecraft_to_use_my_dedicated_gpu/>]
