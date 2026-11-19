@@ -25,7 +25,7 @@ Cached chunks will be loaded up to `/roseglass distance` starting from the clien
 | `/roseglass debug [on\|off]` | Shows/hides debug overlay; omit argument to toggle | **Off** |
 | `/roseglass disk [on\|off]` | Enables/disables disk saving and loading; omit argument to toggle | **On** |
 | `/roseglass status` | Displays statistics and active disk-cache location | — |
-| `/roseglass` | Same as `status` | — |
+| `/roseglass cleanup [Number]` | Will trigger auto-cleanup of multiplayer cache instances in Number days, default is 15. -1 will disable. | — |
 | `/roseglass clear` | Clears cached memory and pauses disk reads; leaves disk files intact. (Run if too many chunks are loaded and game becomes too laggy. Also, set /roseglass distance to a lower number) | — |
 
 ## Limitations
