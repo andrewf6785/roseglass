@@ -26,7 +26,8 @@ Cached chunks will be loaded up to `/roseglass distance` starting from the clien
 | `/roseglass debug [on\|off]` | Shows/hides debug overlay; omit argument to toggle | **Off** |
 | `/roseglass disk [on\|off]` | Enables/disables disk saving and loading; omit argument to toggle | **On** |
 | `/roseglass status` | Displays statistics and active disk-cache location | — |
-| `/roseglass cleanup [Number]` | Will trigger auto-cleanup of multiplayer cache instances in Number days, default is 15. -1 will disable. | — |
+| `/roseglass cleanup <days>` |	Sets the automatic cleanup interval; use -1 to disable automatic cleanup | — |
+| `/roseglass cleanup` | Triggers cleanup immediately | — |
 | `/roseglass clear` | Clears cached memory and pauses disk reads; leaves disk files intact. (Run if too many chunks are loaded and game becomes too laggy. Also, set /roseglass distance to a lower number) | — |
 
 ## Limitations
@@ -54,7 +55,7 @@ So if there are gaps around the player on multiplayer, increase your client rend
 
 ## Setup
 
-Recommended: download .jar file from modrinth, curse forge, or from github (`roseglass-0.8.4.jar`)
+Recommended: download .jar file from modrinth, curse forge, or from github (`roseglass-0.9.2.jar`)
 
 Alternatively, you can download the source from github (this project is open source) and compile the mod yourself:
 
@@ -64,6 +65,10 @@ To build on Windows, install JDK 8, then run the following from the repository f
 $env:JAVA_HOME = 'C:\Path\To\Your\jdk8'
 
 .\gradlew.bat build
+
+On macOS or Linux, select JDK 8 and run bash ./gradlew build. The wrapper downloads Gradle 4.10.3; the first build needs internet access for ForgeGradle and Minecraft/Forge dependencies.
+
+The installable jar is build/libs/roseglass-0.9.2.jar. Do not install the -sources.jar file.
 
 
 I would only install this mod if you have a dedicated gpu to do rendering with. All testing was done with an RTX 3070. Do what ya want though. [<https://www.reddit.com/r/Minecraft/comments/rp8vfn/how_do_i_set_minecraft_to_use_my_dedicated_gpu/>]
