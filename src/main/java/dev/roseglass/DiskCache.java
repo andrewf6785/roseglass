@@ -25,8 +25,14 @@ final class DiskCache {
     private static final ExecutorService IO = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "roseglass-cache-io"); thread.setDaemon(true); return thread;
     });
+    private static final List<Runnable> FINALIZERS = new CopyOnWriteArrayList<>();
     static {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            IO.execute(() -> {
+                for (Runnable finalizer : FINALIZERS) {
+                    try { finalizer.run(); } catch (RuntimeException e) { LOG.warn("Cache finalization failed", e); }
+                }
+            });
             IO.shutdown();
             try { IO.awaitTermination(10, TimeUnit.SECONDS); }
             catch (InterruptedException e) { Thread.currentThread().interrupt(); }
@@ -107,6 +113,19 @@ final class DiskCache {
             } catch (IOException e) { fail("Cannot open disk cache", e); }
             selectNearby();
         });
+    }
+
+    static void execute(Runnable task) { IO.execute(task); }
+    static void onShutdown(Runnable task) { FINALIZERS.add(task); }
+
+    // Called on the shared IO worker after an externally managed multiplayer write.
+    void saved(VisualChunk chunk) {
+        Path path = directory.resolve("c_" + chunk.xPosition + "_" + chunk.zPosition + ".rgc.gz");
+        files.put(Visibility.key(chunk.xPosition, chunk.zPosition), path);
+        index.put(chunk.xPosition, chunk.zPosition, path);
+        View current = view;
+        if (enabled && current != null && current.contains(chunk.xPosition, chunk.zPosition))
+            additions.add(new Addition(current, new RegionIndex.Column(chunk.xPosition, chunk.zPosition, path)));
     }
 
     static Path scope(Path root, String kind, String identity, int dimension) {

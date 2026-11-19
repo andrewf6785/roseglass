@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.LinkedHashSet;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.WorldClient;
 import net.minecraft.client.resources.IReloadableResourceManager;
@@ -21,6 +22,7 @@ import net.minecraft.util.BlockPos;
 import net.minecraft.util.ChatComponentText;
 import net.minecraft.world.chunk.Chunk;
 import net.minecraft.world.chunk.EmptyChunk;
+import net.minecraft.network.NetworkManager;
 import net.minecraftforge.client.ClientCommandHandler;
 import net.minecraftforge.client.event.RenderGameOverlayEvent;
 import net.minecraftforge.client.event.RenderWorldLastEvent;
@@ -37,7 +39,7 @@ import net.minecraftforge.fml.common.gameevent.TickEvent;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-@Mod(modid = "roseglass", name = "roseglass", version = "0.8.4",
+@Mod(modid = "roseglass", name = "roseglass", version = "0.9.2",
         clientSideOnly = true, acceptedMinecraftVersions = "[1.8.9]", acceptableRemoteVersions = "*")
 public final class RoseglassMod {
     private static final Logger LOG = LogManager.getLogger("roseglass");
@@ -62,6 +64,66 @@ public final class RoseglassMod {
     private DiskCache disk;
     private boolean invalidateMeshes;
     private int eligibleCount, drawnCount, pendingCount;
+    private boolean multiplayer;
+    private NetworkManager connection;
+    private final Set<Long> freshMultiplayer = new HashSet<>();
+    private final Set<Long> fingerprintQueue = new LinkedHashSet<>();
+    private MultiplayerCache multiplayerCache;
+    private MultiplayerCache.Session multiplayerSession;
+    private int cleanupInterval = 15, cleanupAge = 15, cleanupChunks = 256;
+
+    private final MultiplayerPackets packets = new MultiplayerPackets(new MultiplayerPackets.Listener() {
+        @Override public void connected(NetworkManager manager) {
+            // The Forge connection event can precede Join Game and creation of the local player.
+            // Minecraft.getNetHandler() reads the player's sendQueue and is null at this point.
+            if (!manager.isChannelOpen() || manager.isLocalChannel() || mc.isSingleplayer()) return;
+            if (connection != null && connection != manager) resetMultiplayer();
+            connection = manager; multiplayer = !mc.isSingleplayer();
+            LOG.info("Multiplayer cache connection observer active");
+        }
+        @Override public void disconnected(NetworkManager manager) {
+            if (connection != manager) return;
+            resetMultiplayer(); connection = null; multiplayer = false;
+        }
+        @Override public void transition(NetworkManager manager) {
+            if (connection == manager && multiplayer) resetMultiplayer();
+        }
+        @Override public void fullChunk(NetworkManager manager, int x, int z) {
+            if (connection != manager || !multiplayer || mc.theWorld == null) return;
+            syncWorld();
+            Chunk chunk = world.getChunkProvider().provideChunk(x, z);
+            if (chunk instanceof EmptyChunk || !chunk.isLoaded()) return;
+            long key = Visibility.key(x, z);
+            freshMultiplayer.add(key); liveChunks.put(key, chunk); pendingLive.add(key);
+            if (diskEnabled) {
+                ensureMultiplayerSession();
+                if (multiplayerSession != null) fingerprintQueue.add(key);
+            }
+        }
+    });
+
+    private void ensureMultiplayerSession() {
+        if (multiplayerSession != null || !multiplayer || !diskEnabled || world == null) return;
+        String identity = mc.getCurrentServerData() == null ? connection.getRemoteAddress().toString()
+                : mc.getCurrentServerData().serverIP.trim().toLowerCase(java.util.Locale.ROOT);
+        multiplayerSession = multiplayerCache.start(identity, world.provider.getDimensionId());
+    }
+
+    private void resetMultiplayer() {
+        DiskCache previous = disk;
+        saveLiveForExit();
+        if (previous != null) previous.disable();
+        disk = null;
+        if (multiplayerSession != null) multiplayerCache.stop(multiplayerSession);
+        multiplayerSession = null;
+        freshMultiplayer.clear(); fingerprintQueue.clear(); clear();
+    }
+
+    private void saveSnapshot(VisualChunk snapshot) {
+        if (multiplayer) {
+            if (diskEnabled && multiplayerSession != null) multiplayerCache.save(multiplayerSession, snapshot, disk);
+        } else if (disk != null) disk.save(snapshot);
+    }
 
     private static final class CachedChunk {
         final VisualChunk chunk;
@@ -109,8 +171,18 @@ public final class RoseglassMod {
         diskEnabled = config.getBoolean("diskCache", "storage", true, "Save/load world-specific visual snapshots on disk.");
         borderEnabled = config.getBoolean("borderQueue", "rendering", true,
                 "Force draw the three outer rings inside vanilla render distance. /roseglass border on|off");
+        cleanupInterval = config.getInt("cleanupIntervalDays", "multiplayer", 15, -1, Integer.MAX_VALUE,
+                "Automatic cleanup interval in days; -1 disables automatic cleanup. /roseglass cleanup [days]");
+        if (cleanupInterval == 0) { cleanupInterval = 15; config.get("multiplayer", "cleanupIntervalDays", 15).set(15); }
+        cleanupAge = config.getInt("cleanupUnusedDays", "multiplayer", 15, 1, Integer.MAX_VALUE,
+                "Minimum days since successful use before a multiplayer map cache can be deleted.");
+        cleanupChunks = config.getInt("cleanupChunkLimit", "multiplayer", 256, 1, Integer.MAX_VALUE,
+                "Only multiplayer caches with fewer than this many chunks can be deleted.");
+        multiplayerCache = new MultiplayerCache(mc.mcDataDir.toPath().resolve(".roseglass/multiplayer_cached_chunk_data"));
+        multiplayerCache.settings(cleanupInterval, cleanupAge, cleanupChunks);
         if (config.hasChanged()) config.save();
         MinecraftForge.EVENT_BUS.register(this);
+        MinecraftForge.EVENT_BUS.register(packets);
         FMLCommonHandler.instance().bus().register(this);
         ClientCommandHandler.instance.registerCommand(new Control());
         ((IReloadableResourceManager) mc.getResourceManager()).registerReloadListener(manager -> invalidateMeshes = true);
@@ -141,21 +213,24 @@ public final class RoseglassMod {
             if (world != null) world.removeWorldAccess(terrainUpdates);
             clear();
             world = mc.theWorld;
+            if (multiplayer) { freshMultiplayer.clear(); fingerprintQueue.clear(); }
             if (world != null) world.addWorldAccess(terrainUpdates);
             openDisk();
         }
     }
 
     private void openDisk() {
+        if (multiplayerSession != null) multiplayerCache.stop(multiplayerSession);
+        multiplayerSession = null;
+        if (multiplayer && disk != null) disk.disable();
         disk = null;
         diskReadsPaused = false;
         if (!diskEnabled || world == null) return;
+        if (multiplayer) return; // Only fresh full-chunk packets may initialize a new multiplayer map.
         String kind, identity;
         if (mc.isSingleplayer() && mc.getIntegratedServer() != null) {
             kind = "world"; identity = mc.getIntegratedServer().getFolderName()
                     + "|seed=" + mc.getIntegratedServer().worldServerForDimension(0).getSeed();
-        } else if (mc.getCurrentServerData() != null) {
-            kind = "server"; identity = mc.getCurrentServerData().serverIP.trim().toLowerCase(java.util.Locale.ROOT);
         } else {
             LOG.warn("No reliable world/server identity; disk cache disabled for this session"); return;
         }
@@ -165,9 +240,15 @@ public final class RoseglassMod {
     }
 
     private void saveLiveForExit() {
-        if (disk == null) return;
-        for (Chunk chunk : liveChunks.values()) if (chunk.isLoaded() && chunk.getWorld() == world)
-            disk.save(VisualChunk.capture(chunk));
+        if (disk == null && multiplayerSession == null) return;
+        for (Chunk chunk : liveChunks.values()) if (chunk.isLoaded() && chunk.getWorld() == world) {
+            if (multiplayer) {
+                if (diskEnabled && multiplayerSession != null
+                        && freshMultiplayer.contains(Visibility.key(chunk.xPosition, chunk.zPosition)))
+                    multiplayerCache.observe(multiplayerSession, VisualChunk.capture(chunk), MapFingerprint.capture(chunk));
+            } else saveSnapshot(VisualChunk.capture(chunk));
+        }
+        if (multiplayer && disk != null) disk.disable();
         disk = null;
     }
 
@@ -180,6 +261,7 @@ public final class RoseglassMod {
             if (current == null || Visibility.distance(Visibility.chunk(current.posX), Visibility.chunk(current.posZ),
                     result.chunk.xPosition, result.chunk.zPosition) > visualRadius) continue;
             cache.put(result.key, new CachedChunk(result.chunk));
+            if (multiplayer && multiplayerSession != null) multiplayerCache.used(multiplayerSession);
             dirtyNeighbors(result.chunk.xPosition, result.chunk.zPosition);
         }
         Entity camera = mc.getRenderViewEntity();
@@ -195,6 +277,8 @@ public final class RoseglassMod {
         if (chunk instanceof EmptyChunk) return;
         syncWorld();
         long key = Visibility.key(chunk.xPosition, chunk.zPosition);
+        if (multiplayer && !freshMultiplayer.remove(key)) return;
+        fingerprintQueue.remove(key);
         liveChunks.remove(key);
         VisualChunk snapshot = VisualChunk.capture(chunk);
         BorderColumn prepared = border.remove(key);
@@ -215,7 +299,9 @@ public final class RoseglassMod {
         retained.mesh.borderOverlap = false;
         pendingLive.remove(key);
         // No synchronous mesh build here. Existing section lists transfer intact; missing work waits.
-        if (disk != null) disk.save(snapshot);
+        if (multiplayer && diskEnabled && multiplayerSession != null)
+            multiplayerCache.observe(multiplayerSession, snapshot, MapFingerprint.capture(chunk));
+        else saveSnapshot(snapshot);
         // Provider removal changes ownership, not terrain: retain meshes and do not dirty neighbors.
     }
 
@@ -290,6 +376,7 @@ public final class RoseglassMod {
             Chunk live = world.getChunkProvider().provideChunk(x, z);
             CachedChunk cached = cache.get(Visibility.key(x, z));
             neighbors[(dz + 1) * 3 + dx + 1] = !(live instanceof EmptyChunk) && live.isLoaded()
+                    && (!multiplayer || freshMultiplayer.contains(Visibility.key(x, z)))
                     ? ColumnData.live(live) : cached == null ? null : cached.chunk;
         }
         neighbors[4] = center;
@@ -299,6 +386,10 @@ public final class RoseglassMod {
     @SubscribeEvent public void worldUnloaded(WorldEvent.Unload event) {
         if (event.world.isRemote && event.world == world) {
             saveLiveForExit();
+            if (multiplayerSession != null) multiplayerCache.stop(multiplayerSession);
+            multiplayerSession = null;
+            if (multiplayer) freshMultiplayer.clear();
+            fingerprintQueue.clear();
             world.removeWorldAccess(terrainUpdates);
             clear();
             world = null;
@@ -307,6 +398,7 @@ public final class RoseglassMod {
 
     // ChunkProviderClient.chunkExists() is always true. provideChunk() is a non-generating lookup here.
     private boolean live(VisualChunk cached) {
+        if (multiplayer && !freshMultiplayer.contains(Visibility.key(cached.xPosition, cached.zPosition))) return false;
         Chunk chunk = mc.theWorld.getChunkProvider().provideChunk(cached.xPosition, cached.zPosition);
         return !(chunk instanceof EmptyChunk) && chunk.isLoaded();
     }
@@ -331,10 +423,33 @@ public final class RoseglassMod {
         clientTicks++;
         syncWorld();
         collectGarbage();
+        // Full packets can arrive in large bursts. Copy at most two live fingerprint inputs per tick.
+        if (multiplayer && diskEnabled && multiplayerSession != null) {
+            Iterator<Long> fingerprints = fingerprintQueue.iterator();
+            for (int i = 0; i < 2 && fingerprints.hasNext(); i++) {
+                long key = fingerprints.next(); fingerprints.remove();
+                Chunk chunk = loadedAt((int) (key >> 32), (int) key);
+                if (chunk != null) multiplayerCache.observe(multiplayerSession,
+                        VisualChunk.capture(chunk), MapFingerprint.capture(chunk));
+            }
+        }
+        multiplayerCache.tick(System.currentTimeMillis());
+        MultiplayerCache.Activation activation;
+        while ((activation = multiplayerCache.poll()) != null) {
+            if (!diskEnabled || activation.session != multiplayerSession) continue;
+            if (disk != null) disk.disable();
+            disk = new DiskCache(activation.path);
+            multiplayerSession.reader = disk;
+            LOG.info("Multiplayer visual disk cache: {}", activation.path);
+        }
+        String notice;
+        while ((notice = multiplayerCache.notice()) != null)
+            if (mc.thePlayer != null) mc.thePlayer.addChatMessage(new ChatComponentText("[roseglass] " + notice));
         pollDisk();
     }
 
     private Chunk loadedAt(int x, int z) {
+        if (multiplayer && !freshMultiplayer.contains(Visibility.key(x, z))) return null;
         // Exact 1.8.9 ChunkProviderClient lookup: missing columns return EmptyChunk, never generate.
         Chunk chunk = world.getChunkProvider().provideChunk(x, z);
         return chunk instanceof EmptyChunk || !chunk.isLoaded() ? null : chunk;
@@ -547,20 +662,33 @@ public final class RoseglassMod {
                 + " queued=" + pendingCount
                 + " vanilla=" + mc.gameSettings.renderDistanceChunks + " visual=" + visualRadius
                 + " minY=" + VisualChunk.MIN_Y + " debug=" + (debugOverlay ? "on" : "off")
-                + " disk=" + (diskEnabled ? "on" : "off")
-                + " edgeDrawn=" + borderDrawn + " edgeQueued=" + borderPending;
+                + " disk=" + (diskEnabled ? "on" : "off");
     }
 
     private final class Control extends CommandBase {
         @Override public String getCommandName() { return "roseglass"; }
         @Override public String getCommandUsage(ICommandSender sender) {
-            return "/roseglass distance <chunks> | debug [on|off] | disk [on|off] | border [on|off] | status | clear";
+            return "/roseglass distance <chunks> | debug [on|off] | disk [on|off] | border [on|off] | cleanup [days|-1] | status | clear";
         }
         @Override public int getRequiredPermissionLevel() { return 0; }
         @Override public boolean canCommandSenderUseCommand(ICommandSender sender) { return true; }
         @Override public void processCommand(ICommandSender sender, String[] args)
                 throws net.minecraft.command.CommandException {
-            if (args.length == 2 && "distance".equals(args[0])) {
+            if ((args.length == 1 || args.length == 2) && "cleanup".equals(args[0])) {
+                if (args.length == 1) {
+                    multiplayerCache.cleanup();
+                    sender.addChatMessage(new ChatComponentText("[roseglass] Multiplayer cleanup queued."));
+                } else {
+                    int days = parseInt(args[1], -1, Integer.MAX_VALUE);
+                    if (days == 0) throw new net.minecraft.command.WrongUsageException("Use positive days or -1 to disable automatic cleanup.");
+                    cleanupInterval = days;
+                    multiplayerCache.settings(days, cleanupAge, cleanupChunks);
+                    config.get("multiplayer", "cleanupIntervalDays", 15).set(days); config.save();
+                    sender.addChatMessage(new ChatComponentText(days == -1 ? "[roseglass] Automatic cleanup disabled."
+                            : "[roseglass] Automatic cleanup interval set to " + days + " days."));
+                }
+                return;
+            } else if (args.length == 2 && "distance".equals(args[0])) {
                 visualRadius = parseInt(args[1], 1, Integer.MAX_VALUE);
                 config.get("rendering", "visualDistance", 32).set(visualRadius);
                 config.save();
@@ -598,7 +726,13 @@ public final class RoseglassMod {
                 diskEnabled = enabled;
                 if (disk != null) disk.disable();
                 openDisk();
-                if (disk != null) for (CachedChunk entry : cache.values()) disk.save(entry.chunk);
+                if (multiplayer && diskEnabled) {
+                    ensureMultiplayerSession();
+                    if (multiplayerSession != null) for (Chunk chunk : liveChunks.values())
+                        if (chunk.isLoaded() && freshMultiplayer.contains(Visibility.key(chunk.xPosition, chunk.zPosition)))
+                            fingerprintQueue.add(Visibility.key(chunk.xPosition, chunk.zPosition));
+                }
+                for (CachedChunk entry : cache.values()) saveSnapshot(entry.chunk);
                 config.get("storage", "diskCache", true).set(diskEnabled);
                 config.save();
                 sender.addChatMessage(new ChatComponentText("[roseglass] disk " + (diskEnabled ? "on" : "off") + "."));
@@ -616,7 +750,8 @@ public final class RoseglassMod {
             if (disk != null) sender.addChatMessage(new ChatComponentText("[roseglass] " + disk.directory() + " (" + disk.status() + ")"));
         }
         @Override public List<String> addTabCompletionOptions(ICommandSender sender, String[] args, BlockPos pos) {
-            if (args.length == 1) return getListOfStringsMatchingLastWord(args, "distance", "debug", "disk", "border", "status", "clear");
+            if (args.length == 1) return getListOfStringsMatchingLastWord(args, "distance", "debug", "disk", "border", "cleanup", "status", "clear");
+            if (args.length == 2 && "cleanup".equals(args[0])) return getListOfStringsMatchingLastWord(args, "15", "-1");
             if (args.length == 2 && ("debug".equals(args[0]) || "disk".equals(args[0]) || "border".equals(args[0])))
                 return getListOfStringsMatchingLastWord(args, "on", "off");
             if (args.length == 2 && "distance".equals(args[0])) return getListOfStringsMatchingLastWord(args, "16", "32", "64", "100");
