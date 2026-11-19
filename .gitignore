@@ -1,4 +1,5 @@
 .gradle/
 build/
 run/
+bin/
 *.log
